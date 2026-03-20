@@ -1,0 +1,61 @@
+### 模型配置（从 SFT pro adapter 开始，作为参考策略）###
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen2___5-7B-Instruct
+adapter_name_or_path: /root/autodl-tmp/saves/qwen2.5-7b/qlora/sft_pro
+trust_remote_code: true
+
+### 训练方式 ###
+stage: dpo
+do_train: true
+finetuning_type: lora
+
+### Flash Attention 2（省注意力层显存，Qwen2.5 原生支持）###
+flash_attn: fa2
+
+### 量化配置（NF4 + 双重量化，与 SFT 保持一致）###
+quantization_bit: 4
+quantization_method: bitsandbytes
+quantization_type: nf4
+double_quantization: true
+
+### LoRA 超参数（比 SFT rank 小，DPO 在 SFT 基础上微调，不需要太大容量）###
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target: all
+
+### DPO 专项配置 ###
+pref_beta: 0.1       # 控制与参考策略的偏离程度，0.1 是标准值
+pref_loss: sigmoid   # 标准 DPO loss
+
+### 数据集 ###
+dataset: dpo_data_pro
+template: qwen
+cutoff_len: 1024
+
+### 训练超参数 ###
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5e-6
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+weight_decay: 0.01
+bf16: true
+max_grad_norm: 1.0
+gradient_checkpointing: true
+
+### 验证配置（从 DPO 数据中划出 5% 做验证）###
+val_size: 0.10
+eval_steps: 50
+eval_strategy: steps
+
+### 输出 ###
+logging_steps: 5
+save_steps: 50
+save_total_limit: 2
+output_dir: /root/autodl-tmp/saves/qwen2.5-7b/qlora/dpo_pro
+overwrite_output_dir: true
+
+report_to: tensorboard
+plot_loss: true

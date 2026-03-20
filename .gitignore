@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# API Keys & 环境变量
+.env
+.env.local
+*.env
+
+# 模型权重（体积过大，不入库）
+*.safetensors
+*.bin
+*.pt
+*.pth
+adapter_model.*
+optimizer.pt
+scheduler.pt
+rng_state.pth
+
+# 训练中间产物
+checkpoint-*/
+runs/
+wandb/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 临时文件
+*.tmp
+*.log
+nohup.out

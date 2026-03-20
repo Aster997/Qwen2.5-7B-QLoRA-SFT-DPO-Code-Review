@@ -1,0 +1,54 @@
+### 模型配置 ###
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen2___5-7B-Instruct
+trust_remote_code: true
+
+### 训练方式 ###
+stage: sft
+do_train: true
+finetuning_type: lora
+
+### 量化配置 ###
+quantization_bit: 4
+quantization_method: bitsandbytes
+quantization_type: nf4
+double_quantization: true
+
+### LoRA 超参数 ###
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.1
+lora_target: all
+
+### 数据集（代码审查 + 通用数据防止灾难性遗忘）###
+dataset: sft_pro_train,alpaca_zh_demo,identity
+eval_dataset: sft_pro_val
+template: qwen
+cutoff_len: 2048
+
+### 训练超参数 ###
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5e-5
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+weight_decay: 0.01
+bf16: true
+max_grad_norm: 1.0
+gradient_checkpointing: true
+
+### 验证配置（监控过拟合）###
+val_size: 0.0
+eval_steps: 100
+eval_strategy: steps
+
+### 输出 ###
+logging_steps: 10
+save_steps: 100
+save_total_limit: 3
+output_dir: /root/autodl-tmp/saves/qwen2.5-7b/qlora/sft_pro
+overwrite_output_dir: true
+
+report_to: tensorboard
+plot_loss: true
