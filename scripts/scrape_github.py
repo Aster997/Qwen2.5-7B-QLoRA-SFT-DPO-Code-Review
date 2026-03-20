@@ -9,8 +9,8 @@
 
 用法：
   python scripts/scrape_github.py \\
-      --github-token ghp_xxx \\
-      --api-key sk-xxx \\
+      --github-token <YOUR_GITHUB_TOKEN> \\
+      --api-key <YOUR_DEEPSEEK_API_KEY> \\
       --base-url https://api.deepseek.com/v1 \\
       --target 150 \\
       --out data/sft_source_a.json

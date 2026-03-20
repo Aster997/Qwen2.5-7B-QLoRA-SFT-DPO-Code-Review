@@ -10,7 +10,7 @@ DPO 数据构建脚本
   python scripts/build_dpo_data.py \
       --eval-json data/eval_results_sft_pro_full.json \
       --exclude-txt data/eval_manual_samples.txt \
-      --api-key sk-xxx \
+      --api-key <YOUR_DEEPSEEK_API_KEY> \
       --synth-target 360 \
       --out data/dpo_data.json
 """

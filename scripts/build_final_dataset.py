@@ -14,7 +14,7 @@
 
   # 清洗 + 调 API 补充代码正确样本到100条
   python scripts/build_final_dataset.py --input data/sft_generated.json \\
-      --fill-correct --api-key sk-xxx --base-url https://api.deepseek.com/v1
+      --fill-correct --api-key <YOUR_DEEPSEEK_API_KEY> --base-url https://api.deepseek.com/v1
 
   # 清洗 + 合并来源A
   python scripts/build_final_dataset.py --input data/sft_generated.json \\
