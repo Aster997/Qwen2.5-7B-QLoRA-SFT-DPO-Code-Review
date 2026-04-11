@@ -26,6 +26,12 @@ checkpoint-*/
 runs/
 wandb/
 
+# 数据集（生成产物，体积大，通过 scp 传输到服务器）
+data/sft_*.json
+data/final/
+# dataset_info.json 保留（需要入库，用于 LLaMA-Factory 注册）
+!data/dataset_info.json
+
 # 系统文件
 .DS_Store
 Thumbs.db

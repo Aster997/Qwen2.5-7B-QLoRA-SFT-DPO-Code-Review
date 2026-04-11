@@ -2,23 +2,25 @@
 最终数据集构建脚本
 
 功能：
-  1. 加载生成的数据（来源B），做近似去重清洗
-  2. 检查并补充「代码正确」样本（如不足则调 API 补生成）
-  3. 可选：合并来源A（手动收集的真实数据）
-  4. 划分 训练集 / 验证集 / 测试集（测试集保证场景覆盖）
-  5. 写入 LLaMA-Factory 的 dataset_info.json
+  1. 加载多个来源的过滤后数据，做近似去重清洗
+  2. 兼容三种样本结构：普通 / 对抗样本（input 为空）/ 多轮样本（含 history）
+  3. 划分 训练集 / 验证集 / 测试集
+     - 测试集保证：每种主要语言 + 代码正确 + 对抗 + 多轮 都有覆盖
+  4. 写入 LLaMA-Factory 的 dataset_info.json（不写显式 columns 映射，避免覆盖默认 alpaca 字段）
 
 用法：
-  # 只清洗，不补充代码正确样本
-  python scripts/build_final_dataset.py --input data/sft_generated.json
+  python scripts/build_final_dataset.py \\
+      --main         data/sft_main_filtered.json \\
+      --correct      data/sft_correct_filtered.json \\
+      --adversarial  data/sft_adversarial_filtered.json \\
+      --multiturn    data/sft_multiturn_filtered.json \\
+      --github       data/sft_github.json \\
+      --out-dir      data/final \\
+      --prefix       sft_v3 \\
+      --test-size    60
 
-  # 清洗 + 调 API 补充代码正确样本到100条
-  python scripts/build_final_dataset.py --input data/sft_generated.json \\
-      --fill-correct --api-key <YOUR_DEEPSEEK_API_KEY> --base-url https://api.deepseek.com/v1
-
-  # 清洗 + 合并来源A
-  python scripts/build_final_dataset.py --input data/sft_generated.json \\
-      --source-a data/sft_source_a.json
+可选：合并旧的手动收集集
+  --source-a data/sft_source_a.json
 """
 
 import json
@@ -34,11 +36,39 @@ from typing import Optional
 
 
 # ──────────────────────────────────────────────
+# 0. 样本类型工具
+# ──────────────────────────────────────────────
+
+def sample_type(item: dict) -> str:
+    """识别样本类型：multiturn / adversarial / normal"""
+    if item.get("history"):
+        return "multiturn"
+    if not item.get("input"):
+        return "adversarial"
+    return "normal"
+
+
+def dedup_text(item: dict) -> str:
+    """
+    抽取用于去重的文本：
+    - 多轮: history 第一轮 user（含代码）
+    - 对抗: instruction（input 为空）
+    - 普通: input 代码
+    """
+    t = sample_type(item)
+    if t == "multiturn":
+        return item["history"][0][0]
+    if t == "adversarial":
+        return item.get("instruction", "")
+    return item["input"]
+
+
+# ──────────────────────────────────────────────
 # 1. 近似去重
 # ──────────────────────────────────────────────
 
-def fingerprint(code: str) -> str:
-    return hashlib.md5(" ".join(code.split()).encode()).hexdigest()
+def fingerprint(text: str) -> str:
+    return hashlib.md5(" ".join(text.split()).encode()).hexdigest()
 
 
 def similarity(a: str, b: str) -> float:
@@ -48,43 +78,60 @@ def similarity(a: str, b: str) -> float:
 
 def dedup(data: list[dict], sim_threshold: float = 0.90) -> tuple[list[dict], int]:
     """
-    两步去重：
+    两步去重（按样本类型分桶，桶内去重，避免对抗样本和普通代码互相比较）：
       1. 精确去重（MD5）
-      2. 近似去重（SequenceMatcher，O(n^2) 但数据量小可接受）
+      2. 近似去重（SequenceMatcher）
     返回 (去重后数据, 删除条数)
     """
-    # 精确去重
-    seen_fps = set()
-    exact_clean = []
+    # 按类型分桶
+    buckets: dict[str, list[dict]] = {"normal": [], "adversarial": [], "multiturn": []}
     for item in data:
-        fp = fingerprint(item["input"])
-        if fp not in seen_fps:
-            seen_fps.add(fp)
-            exact_clean.append(item)
-    exact_removed = len(data) - len(exact_clean)
+        buckets[sample_type(item)].append(item)
 
-    # 近似去重
-    kept = []
-    kept_inputs = []
-    near_removed = 0
-    for item in exact_clean:
-        code = item["input"]
-        is_dup = False
-        for existing in kept_inputs[-200:]:   # 只和最近200条比，避免O(n^2)过慢
-            if similarity(code, existing) >= sim_threshold:
-                is_dup = True
-                break
-        if not is_dup:
-            kept.append(item)
-            kept_inputs.append(code)
-        else:
-            near_removed += 1
+    all_kept: list[dict] = []
+    total_exact = 0
+    total_near = 0
 
-    total_removed = exact_removed + near_removed
-    print(f"  精确去重删除: {exact_removed} 条")
-    print(f"  近似去重删除: {near_removed} 条（阈值 {sim_threshold*100:.0f}%）")
-    print(f"  去重后剩余  : {len(kept)} 条")
-    return kept, total_removed
+    for type_name, items in buckets.items():
+        if not items:
+            continue
+
+        # 精确去重
+        seen_fps = set()
+        exact_clean = []
+        for item in items:
+            fp = fingerprint(dedup_text(item))
+            if fp not in seen_fps:
+                seen_fps.add(fp)
+                exact_clean.append(item)
+        exact_removed = len(items) - len(exact_clean)
+        total_exact += exact_removed
+
+        # 近似去重
+        kept = []
+        kept_texts = []
+        near_removed = 0
+        for item in exact_clean:
+            text = dedup_text(item)
+            is_dup = False
+            for existing in kept_texts[-200:]:   # 只和最近 200 条比
+                if similarity(text, existing) >= sim_threshold:
+                    is_dup = True
+                    break
+            if not is_dup:
+                kept.append(item)
+                kept_texts.append(text)
+            else:
+                near_removed += 1
+        total_near += near_removed
+
+        all_kept.extend(kept)
+        print(f"  [{type_name}] 输入 {len(items)} → 精确删 {exact_removed} → 近似删 {near_removed} → 保留 {len(kept)}")
+
+    total_removed = total_exact + total_near
+    print(f"  小计：精确 {total_exact} + 近似 {total_near} = {total_removed} 条删除")
+    print(f"  去重后剩余: {len(all_kept)} 条")
+    return all_kept, total_removed
 
 
 # ──────────────────────────────────────────────
@@ -258,6 +305,8 @@ def fill_correct_samples(
 # ──────────────────────────────────────────────
 
 def detect_language(code: str) -> str:
+    if not code:
+        return "N/A"
     patterns = {
         "Python":     [r"\bdef \w+\(", r"\bimport \w+", r"\bclass \w+:"],
         "Go":         [r"\bfunc \w+\(", r":=", r"\bfmt\."],
@@ -271,43 +320,66 @@ def detect_language(code: str) -> str:
     return best if scores[best] > 0 else "Other"
 
 
-def build_test_set(data: list[dict], test_size: int = 50) -> tuple[list[dict], list[dict]]:
+def build_test_set(data: list[dict], test_size: int = 60) -> tuple[list[dict], list[dict]]:
     """
-    构建测试集，保证覆盖：每种主要语言 ≥ 4 条，代码正确样本 ≥ 5 条
+    构建测试集，保证覆盖：
+      - 每种主要语言（普通样本）有最低配额
+      - 代码正确样本 ≥ 5
+      - 对抗样本 ≥ 6（必须有，否则边界场景没法测）
+      - 多轮样本 ≥ 4
     剩余作为训练+验证集
     """
     random.shuffle(data)
 
-    test = []
+    test: list[dict] = []
     remaining = list(data)
 
-    # 目标覆盖
-    lang_quota = {"Python": 8, "Go": 7, "JavaScript": 7, "Java": 5, "SQL": 4, "TypeScript": 4}
+    # ── 类型配额 ──
+    lang_quota = {"Python": 8, "Go": 6, "JavaScript": 6, "Java": 4, "SQL": 3, "TypeScript": 3}
     correct_quota = 5
+    adversarial_quota = 6
+    multiturn_quota = 4
+
     lang_filled = {lang: 0 for lang in lang_quota}
     correct_filled = 0
+    adv_filled = 0
+    mt_filled = 0
 
     # 先按配额选
     for item in data:
         if len(test) >= test_size:
             break
-        lang = detect_language(item["input"])
-        is_correct = is_correct_code_sample(item)
-
+        st = sample_type(item)
         selected = False
-        if is_correct and correct_filled < correct_quota:
-            test.append(item)
-            correct_filled += 1
-            selected = True
-        elif lang in lang_quota and lang_filled.get(lang, 0) < lang_quota[lang]:
-            test.append(item)
-            lang_filled[lang] = lang_filled.get(lang, 0) + 1
-            selected = True
+
+        if st == "multiturn":
+            if mt_filled < multiturn_quota:
+                test.append(item)
+                mt_filled += 1
+                selected = True
+
+        elif st == "adversarial":
+            if adv_filled < adversarial_quota:
+                test.append(item)
+                adv_filled += 1
+                selected = True
+
+        else:  # normal
+            is_correct = is_correct_code_sample(item)
+            lang = detect_language(item["input"])
+            if is_correct and correct_filled < correct_quota:
+                test.append(item)
+                correct_filled += 1
+                selected = True
+            elif lang in lang_quota and lang_filled.get(lang, 0) < lang_quota[lang]:
+                test.append(item)
+                lang_filled[lang] = lang_filled.get(lang, 0) + 1
+                selected = True
 
         if selected:
             remaining.remove(item)
 
-    # 如果还没到 test_size，随机补齐
+    # 如果还没到 test_size，从剩余中按类型均衡补齐
     shortfall = test_size - len(test)
     if shortfall > 0:
         extra = random.sample(remaining, min(shortfall, len(remaining)))
@@ -315,12 +387,19 @@ def build_test_set(data: list[dict], test_size: int = 50) -> tuple[list[dict], l
         for item in extra:
             remaining.remove(item)
 
+    # ── 打印分布 ──
     print(f"\n  测试集构成（共{len(test)}条）：")
-    lang_dist = Counter(detect_language(item["input"]) for item in test)
-    for lang, cnt in lang_dist.most_common():
-        print(f"    {lang:<12} {cnt} 条")
-    correct_in_test = count_correct_samples(test)
-    print(f"    代码正确样本: {correct_in_test} 条")
+    type_dist = Counter(sample_type(item) for item in test)
+    for t, cnt in type_dist.most_common():
+        print(f"    [{t:<12}] {cnt} 条")
+    normal_items = [item for item in test if sample_type(item) == "normal"]
+    if normal_items:
+        lang_dist = Counter(detect_language(item["input"]) for item in normal_items)
+        print(f"  普通样本语言分布：")
+        for lang, cnt in lang_dist.most_common():
+            print(f"    {lang:<12} {cnt} 条")
+    correct_in_test = sum(1 for item in normal_items if is_correct_code_sample(item))
+    print(f"  代码正确样本: {correct_in_test} 条")
 
     return test, remaining
 
@@ -331,8 +410,14 @@ def build_test_set(data: list[dict], test_size: int = 50) -> tuple[list[dict], l
 
 def register_datasets(dataset_info_path: str, datasets: dict):
     """
+    把生成的训练/验证/测试集注册到 LLaMA-Factory 的 dataset_info.json。
+
+    注意：不写显式 columns 映射，让 alpaca 默认字段生效
+    （instruction / input / output / history 都能被自动识别），
+    否则多轮样本的 history 字段会被忽略。
+
     datasets = {
-        "my_sft_train_v2": {"file": "sft_train_v2.json", "desc": "..."},
+        "sft_v3_train": {"file": "final/sft_v3_train.json"},
         ...
     }
     """
@@ -340,10 +425,7 @@ def register_datasets(dataset_info_path: str, datasets: dict):
         info = json.load(f)
 
     for name, meta in datasets.items():
-        info[name] = {
-            "file_name": meta["file"],
-            "columns": {"prompt": "instruction", "query": "input", "response": "output"},
-        }
+        info[name] = {"file_name": meta["file"]}
         print(f"  注册数据集: {name} → {meta['file']}")
 
     with open(dataset_info_path, "w", encoding="utf-8") as f:
@@ -354,69 +436,96 @@ def register_datasets(dataset_info_path: str, datasets: dict):
 # 6. 主流程
 # ──────────────────────────────────────────────
 
+def _load_source(path: Optional[str], label: str) -> list[dict]:
+    """加载一个来源文件，不存在则返回空列表。"""
+    if not path:
+        return []
+    if not Path(path).exists():
+        print(f"  [{label:<12}] 跳过（文件不存在: {path}）")
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        items = json.load(f)
+    print(f"  [{label:<12}] {len(items):>5} 条  ←  {path}")
+    return items
+
+
 def main():
-    parser = argparse.ArgumentParser(description="构建最终训练数据集")
-    parser.add_argument("--input",        required=True,  help="来源B生成数据路径")
-    parser.add_argument("--source-a",     default=None,   help="来源A数据路径（可选）")
-    parser.add_argument("--source-c",     default=None,   help="来源C数据路径（可选）")
-    parser.add_argument("--fill-correct", action="store_true", help="是否调API补充代码正确样本")
-    parser.add_argument("--correct-target", type=int, default=80, help="目标代码正确样本数（默认80）")
-    parser.add_argument("--api-key",      default=None)
-    parser.add_argument("--base-url",     default="https://api.deepseek.com/v1")
-    parser.add_argument("--model",        default="deepseek-chat")
-    parser.add_argument("--test-size",    type=int, default=50,  help="测试集大小")
-    parser.add_argument("--val-ratio",    type=float, default=0.07, help="验证集比例")
-    parser.add_argument("--out-dir",      default="data",  help="输出目录")
-    parser.add_argument("--prefix",       default="sft_v2", help="输出文件名前缀")
+    parser = argparse.ArgumentParser(description="构建最终训练数据集（多来源整合 + 切分）")
+
+    # ── 数据来源（至少要有 main） ──
+    parser.add_argument("--main",         required=True,
+                        help="主集（普通+困难混合，DeepSeek 生成 + filter 过滤后的文件）")
+    parser.add_argument("--correct",      default=None,
+                        help="代码正确集（filter 过滤后的文件）")
+    parser.add_argument("--adversarial",  default=None,
+                        help="对抗样本集（filter 过滤后的文件）")
+    parser.add_argument("--multiturn",    default=None,
+                        help="多轮追问集（filter 过滤后的文件）")
+    parser.add_argument("--github",       default=None,
+                        help="GitHub 真实代码集（scrape_github.py 生成）")
+    parser.add_argument("--source-a",     default=None,
+                        help="（可选）旧的手动收集集，向后兼容")
+
+    # ── 切分参数 ──
+    parser.add_argument("--test-size",    type=int, default=60,  help="测试集大小（默认 60）")
+    parser.add_argument("--val-ratio",    type=float, default=0.05, help="验证集比例（默认 0.05）")
+    parser.add_argument("--sim-threshold", type=float, default=0.90,
+                        help="近似去重阈值，默认 0.90")
+
+    # ── 输出 ──
+    parser.add_argument("--out-dir",      default="data/final",  help="输出目录")
+    parser.add_argument("--prefix",       default="sft_v3", help="输出文件名前缀")
     parser.add_argument("--seed",         type=int, default=42)
     args = parser.parse_args()
 
     random.seed(args.seed)
 
-    # ── 加载数据 ──
-    print("\n[1/6] 加载数据")
-    with open(args.input, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    print(f"  来源B: {len(data)} 条")
+    # ── [1/5] 加载所有来源 ──
+    print("\n[1/5] 加载数据源")
+    sources = [
+        ("main",        args.main),
+        ("correct",     args.correct),
+        ("adversarial", args.adversarial),
+        ("multiturn",   args.multiturn),
+        ("github",      args.github),
+        ("source-a",    args.source_a),
+    ]
+    data: list[dict] = []
+    for label, path in sources:
+        data.extend(_load_source(path, label))
+    print(f"  ─────────────────────")
+    print(f"  合并总量    : {len(data):>5} 条")
 
-    if args.source_a:
-        with open(args.source_a, "r", encoding="utf-8") as f:
-            source_a = json.load(f)
-        data.extend(source_a)
-        print(f"  来源A: {len(source_a)} 条")
+    if not data:
+        print("[错误] 没有任何数据加载，退出")
+        return
 
-    if args.source_c:
-        with open(args.source_c, "r", encoding="utf-8") as f:
-            source_c = json.load(f)
-        data.extend(source_c)
-        print(f"  来源C: {len(source_c)} 条")
+    # ── [2/5] 按类型分桶去重 ──
+    print(f"\n[2/5] 按类型分桶去重（阈值 {args.sim_threshold*100:.0f}%）")
+    data, removed = dedup(data, sim_threshold=args.sim_threshold)
 
-    print(f"  合并后总量: {len(data)} 条")
+    # ── [3/5] 类型分布统计 ──
+    type_dist = Counter(sample_type(item) for item in data)
+    correct_count = sum(
+        1 for item in data
+        if sample_type(item) == "normal" and is_correct_code_sample(item)
+    )
+    print(f"\n[3/5] 去重后类型分布")
+    print(f"  普通      : {type_dist.get('normal', 0):>5} 条（其中代码正确 ~{correct_count} 条）")
+    print(f"  对抗      : {type_dist.get('adversarial', 0):>5} 条")
+    print(f"  多轮      : {type_dist.get('multiturn', 0):>5} 条")
 
-    # ── 去重 ──
-    print("\n[2/6] 近似去重（阈值 90%）")
-    data, removed = dedup(data, sim_threshold=0.90)
+    # 健康检查
+    if type_dist.get("adversarial", 0) < 20:
+        print(f"  [警告] 对抗样本不足 20 条，边界测试可能失败")
+    if type_dist.get("multiturn", 0) < 20:
+        print(f"  [警告] 多轮样本不足 20 条")
+    if correct_count < 50:
+        print(f"  [警告] 代码正确样本不足 50 条，模型可能仍偏向'挑刺'")
 
-    # ── 补充代码正确样本 ──
-    print(f"\n[3/6] 检查「代码正确」样本")
-    current_correct = count_correct_samples(data)
-    print(f"  当前检测到: {current_correct} 条")
-
-    if args.fill_correct and args.api_key:
-        from openai import OpenAI
-        client = OpenAI(api_key=args.api_key, base_url=args.base_url)
-        data = fill_correct_samples(data, args.correct_target, client, args.model)
-    elif current_correct < 20:
-        print(f"  [提示] 代码正确样本不足，建议加 --fill-correct --api-key YOUR_KEY 补充")
-    else:
-        print(f"  代码正确样本充足，跳过补充")
-
-    # ── 随机打乱 ──
+    # ── [4/5] 划分 train / val / test ──
+    print("\n[4/5] 划分数据集")
     random.shuffle(data)
-    print(f"\n[4/6] 总数据量: {len(data)} 条")
-
-    # ── 划分测试集 ──
-    print("\n[5/6] 划分数据集")
     test_set, trainval = build_test_set(data, test_size=args.test_size)
 
     val_size  = max(1, int(len(trainval) * args.val_ratio))
@@ -428,9 +537,10 @@ def main():
     print(f"  测试集: {len(test_set)} 条")
     print(f"  合计  : {len(train_set)+len(val_set)+len(test_set)} 条")
 
-    # ── 保存文件 ──
-    print("\n[6/6] 保存文件")
+    # ── [5/5] 保存 + 注册 ──
+    print("\n[5/5] 保存文件")
     out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     files = {
         f"{args.prefix}_train": (train_set, f"{args.prefix}_train.json"),
@@ -445,12 +555,25 @@ def main():
         print(f"  保存: {path}  ({len(split)} 条)")
 
     # ── 注册到 dataset_info.json ──
-    dataset_info_path = out_dir / "dataset_info.json"
+    # dataset_info.json 在 data/ 下，file_name 字段是相对 data/ 的相对路径
+    import os
+    dataset_info_path = Path("data") / "dataset_info.json"
     if dataset_info_path.exists():
+        print(f"\n  注册到 {dataset_info_path}")
+        try:
+            rel_dir_str = os.path.relpath(out_dir, "data").replace("\\", "/")
+        except ValueError:
+            rel_dir_str = str(out_dir).replace("\\", "/")
+
         register_datasets(
             str(dataset_info_path),
-            {name: {"file": filename} for name, (_, filename) in files.items()},
+            {
+                name: {"file": f"{rel_dir_str}/{filename}" if rel_dir_str != "." else filename}
+                for name, (_, filename) in files.items()
+            },
         )
+    else:
+        print(f"  [提示] {dataset_info_path} 不存在，跳过注册")
 
     # ── 最终报告 ──
     print(f"""
@@ -461,9 +584,10 @@ def main():
   测试集  {len(test_set):>5} 条  →  {args.prefix}_test.json
 ╚══════════════════════════════════════╝
 
-下一步：更新训练配置 yaml 文件中的 dataset 字段：
-  dataset: {args.prefix}_train
-  val_size: 0   # 已单独划分，不需要再自动划分
+下一步：更新训练配置 yaml 中的 dataset 字段：
+  dataset: {args.prefix}_train,alpaca_zh_demo,identity
+  eval_dataset: {args.prefix}_val
+  val_size: 0.0   # 已单独划分
 """)
 
 

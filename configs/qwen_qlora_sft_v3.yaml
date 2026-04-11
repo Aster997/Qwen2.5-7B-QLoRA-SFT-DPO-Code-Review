@@ -1,0 +1,94 @@
+### ═══════════════════════════════════════════════════
+### Qwen2.5-7B Code Reviewer — QLoRA SFT v3
+### 相比 sft_pro 的变更及每个决策的 why 见注释
+### ═══════════════════════════════════════════════════
+
+### 模型配置 ###
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen2___5-7B-Instruct
+trust_remote_code: true
+
+### 训练方式 ###
+stage: sft
+do_train: true
+finetuning_type: lora
+
+### Flash Attention 2 ###
+# [v3 新增] sft_pro 没开 flash_attn，v3 开启
+# Why: L20 48GB 支持 FA2，能把注意力层显存砍约 40%，
+#       让 batch_size=2 成为可能，提升 GPU 利用率
+flash_attn: fa2
+
+### 量化配置（与 sft_pro 一致）###
+# Why: NF4 + 双量化是 QLoRA 标配，7B 模型量化后约占 4.5GB 显存，
+#       剩余显存留给 optimizer states 和 activations
+quantization_bit: 4
+quantization_method: bitsandbytes
+quantization_type: nf4
+double_quantization: true
+
+### LoRA 超参数 ###
+# [v3 变更] rank 16→32, alpha 32→64
+# Why: v3 数据量从 861→~2500+ 条，rank=16 时 LoRA 参数量仅约 26M，
+#       信息容量不足以编码 3x 的数据信号。rank=32 (约 52M 参数) 更匹配。
+#       alpha = 2×rank 是经验黄金比例，保持 scaling factor = alpha/rank = 2 不变
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.1
+lora_target: all
+
+### 数据集 ###
+# [v3 变更] sft_pro_train → sft_v3_train（含对抗+多轮+正确代码+GitHub 真实代码）
+# Why: v3 整合了 5 个来源，经过 critic 质量过滤，覆盖更全面
+#       alpaca_zh_demo: 混入通用中文指令防止灾难性遗忘（7B 模型容量小，容易被 domain data 覆盖）
+#       identity: 让模型知道自己是谁，减少身份困惑
+dataset: sft_v3_train,alpaca_zh_demo,identity
+eval_dataset: sft_v3_val
+template: qwen
+cutoff_len: 2048
+# Why: 之前 check_token_length 显示 >95% 样本在 2048 以内。
+#       L20 48GB 显存充足，不需要像 DPO 阶段那样压到 1024
+
+### 训练超参数 ###
+# [v3 变更] batch_size 1→2（L20 48GB 吃得下）
+# Why: 等效 batch = batch_size × grad_accum = 2×8 = 16（与 sft_pro 一致），
+#       但更少的 accumulation steps 意味着更频繁的参数更新，训练更稳定
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+gradient_accumulation_steps: 8
+
+# [v3 变更] lr 5e-5→3e-5
+# Why: 数据量增加 3 倍，但 epoch 也增加 → 总更新步数增加约 3×。
+#       学习率应适当降低避免震荡。3e-5 是 QLoRA SFT 在 2000-5000 条数据量级的经验值。
+#       参考 QLoRA 原论文 (Dettmers et al., 2023) 推荐范围 1e-5 ~ 5e-5
+learning_rate: 3e-5
+
+# [v3 变更] epoch 3→4
+# Why: 数据量扩了但还不到万级，4 个 epoch 让模型能充分学习新增的对抗/多轮模式。
+#       过拟合靠 eval_loss 监控 + early stopping 判断（如果 eval_loss 连续 3 次不降就该停）
+num_train_epochs: 4.0
+
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+weight_decay: 0.01
+bf16: true
+max_grad_norm: 1.0
+gradient_checkpointing: true
+
+### 验证配置 ###
+# Why: val_size=0 因为已经在 build_final_dataset.py 里单独切了验证集，
+#       不让 LLaMA-Factory 再自动从训练集里划
+val_size: 0.0
+eval_steps: 50
+# [v3 变更] eval_steps 100→50
+# Why: 数据量增加后总 step 数增多，更频繁评估能更早发现过拟合拐点
+eval_strategy: steps
+
+### 输出 ###
+logging_steps: 10
+save_steps: 100
+save_total_limit: 3
+output_dir: /root/autodl-tmp/saves/qwen2.5-7b/qlora/sft_v3
+overwrite_output_dir: true
+
+report_to: tensorboard
+plot_loss: true

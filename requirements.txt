@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────
+# 本地数据生成 / 过滤 / 整合脚本依赖
+# 用于在本机运行 scripts/ 下的数据处理脚本
+# （训练依赖见 setup_autodl.sh，需在 AutoDL 上安装）
+# ─────────────────────────────────────────────────────────
+
+# DeepSeek API（兼容 OpenAI SDK）
+openai>=1.35.0
+
+# HTTP 请求（scrape_github.py）
+requests>=2.31.0
+
+# 进度条
+tqdm>=4.66.0
+
+# 数据处理（analyze_sft_data.py / build_final_dataset.py）
+numpy>=1.26.0
+
+# 可选：用于 check_token_length.py 在本地做 token 统计
+# transformers 只做 tokenizer，不需要 GPU
+# 如不需要本地 token 检查可注释掉
+transformers>=4.43.0
+sentencepiece>=0.2.0
+protobuf>=3.20.0

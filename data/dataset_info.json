@@ -771,5 +771,14 @@
       "chosen": "chosen",
       "rejected": "rejected"
     }
+  },
+  "sft_v3_train": {
+    "file_name": "final/sft_v3_train.json"
+  },
+  "sft_v3_val": {
+    "file_name": "final/sft_v3_val.json"
+  },
+  "sft_v3_test": {
+    "file_name": "final/sft_v3_test.json"
   }
 }
