@@ -1,0 +1,20 @@
+### ═══════════════════════════════════════════════════
+### 合并 SFT v3 LoRA 适配器到基础模型
+### 选用 checkpoint-900（现存 checkpoint 中 eval_loss 最低 = 0.7258）
+### ═══════════════════════════════════════════════════
+
+### 基础模型 ###
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen2___5-7B-Instruct
+adapter_name_or_path: /root/autodl-tmp/saves/qwen2.5-7b/qlora/sft_v3/checkpoint-900
+trust_remote_code: true
+
+### 导出配置 ###
+# Why template: qwen — 保留 Qwen2.5 对话模板
+template: qwen
+finetuning_type: lora
+
+### 输出路径 ###
+export_dir: /root/autodl-tmp/models/qwen2.5-7b-sft-v3
+export_size: 2           # 每个 shard 最大 2GB
+export_device: cpu       # CPU 合并，避免占 GPU 显存
+export_legacy_format: false

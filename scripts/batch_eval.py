@@ -217,11 +217,12 @@ def write_compare(samples: list[dict], out_path: str):
 # ─────────────────────────────────────────────
 
 def run_inference(model, tokenizer, samples: list[dict],
-                  key: str, label: str) -> list[dict]:
-    print(f"\n开始推理 [{label}]，共 {len(samples)} 条...")
+                  key: str, label: str, max_new_tokens: int = 1024) -> list[dict]:
+    print(f"\n开始推理 [{label}]，共 {len(samples)} 条 (max_new_tokens={max_new_tokens})...")
     for i, s in enumerate(samples, 1):
         print(f"  [{i}/{len(samples)}] 样本{s['idx']} ({s['lang']})...", end=" ", flush=True)
-        s[key] = infer_one(model, tokenizer, s["instruction"], s["input"])
+        s[key] = infer_one(model, tokenizer, s["instruction"], s["input"],
+                           max_new_tokens=max_new_tokens)
         print("✓")
     return samples
 
@@ -254,7 +255,8 @@ def main():
         # Base 模型
         print("\n[1/3] Base 模型（无 adapter）")
         model, tokenizer = load_model(args.model, adapter_path=None)
-        samples = run_inference(model, tokenizer, samples, key="base", label="Base")
+        samples = run_inference(model, tokenizer, samples, key="base", label="Base",
+                                max_new_tokens=args.max_new_tokens)
         del model
         torch.cuda.empty_cache()
 
@@ -262,7 +264,8 @@ def main():
         if args.sft_adapter:
             print("\n[2/3] SFT 模型")
             model, tokenizer = load_model(args.model, adapter_path=args.sft_adapter)
-            samples = run_inference(model, tokenizer, samples, key="sft", label="SFT")
+            samples = run_inference(model, tokenizer, samples, key="sft", label="SFT",
+                                    max_new_tokens=args.max_new_tokens)
             del model
             torch.cuda.empty_cache()
         else:
@@ -272,7 +275,8 @@ def main():
         if args.dpo_adapter:
             print("\n[3/3] SFT+DPO 模型")
             model, tokenizer = load_model(args.model, adapter_path=args.dpo_adapter)
-            samples = run_inference(model, tokenizer, samples, key="dpo", label="SFT+DPO")
+            samples = run_inference(model, tokenizer, samples, key="dpo", label="SFT+DPO",
+                                    max_new_tokens=args.max_new_tokens)
             del model
             torch.cuda.empty_cache()
         else:
@@ -285,7 +289,8 @@ def main():
         label = "SFT" if args.adapter else "Base"
         model, tokenizer = load_model(args.model, adapter_path=args.adapter)
         samples = run_inference(model, tokenizer, samples,
-                                key="prediction", label=label)
+                                key="prediction", label=label,
+                                max_new_tokens=args.max_new_tokens)
         write_single(samples, args.out, model_label=label)
 
     # 同时保存 JSON 方便后续分析

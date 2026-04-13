@@ -1,0 +1,103 @@
+### ═══════════════════════════════════════════════════════════
+### Qwen2.5-7B Code Reviewer — QLoRA DPO v3 (on-policy)
+### 相比 dpo_pro 的关键变更及每个决策的 why 见注释
+### ═══════════════════════════════════════════════════════════
+
+### 模型配置（从 SFT v3 adapter 开始，作为参考策略 π_ref）###
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen2___5-7B-Instruct
+adapter_name_or_path: /root/autodl-tmp/saves/qwen2.5-7b/qlora/sft_v3/checkpoint-900
+trust_remote_code: true
+# Why checkpoint-900: eval_loss 最低 (0.7258)，是现存 checkpoint 中最优
+
+### 训练方式 ###
+stage: dpo
+do_train: true
+finetuning_type: lora
+
+### Flash Attention 2 ###
+flash_attn: fa2
+# Why: v2 用了，v3 继续用，省 40% 注意力层显存
+
+### 量化配置（NF4 + 双重量化，与 SFT 一致）###
+quantization_bit: 4
+quantization_method: bitsandbytes
+quantization_type: nf4
+double_quantization: true
+
+### LoRA 超参数 ###
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target: all
+# Why rank=8: DPO 只做偏好对齐，不引入新能力，rank 小即可
+#   rank 太大会破坏 SFT v3 学到的底座能力，导致遗忘
+
+### ═══════════════════ DPO 关键变更 ═══════════════════
+
+pref_beta: 0.3       # [v3 变更] v2=0.1 → v3=0.3
+# Why pref_beta 0.1 → 0.3:
+#   - beta 越大，chosen/rejected 对数概率差被放大越多，压制 rejected 更强
+#   - v2 用 0.1 + off-policy 数据 = 既温和又信号弱，等于白训
+#   - v3 用 on-policy 数据（rejected 真的是模型自己的输出），可以用更大 beta
+#   - 0.3 是 DPO 论文里对 on-policy 的推荐值
+
+pref_loss: sigmoid   # 标准 DPO 损失
+# 备选：ipo（较新，对长度偏差更鲁棒），本项目数据量小先用经典 sigmoid
+
+### ═══════════════════ 数据集 ═══════════════════
+
+dataset: dpo_v3_onpolicy
+template: qwen
+cutoff_len: 2048       # [v3 变更] v2=1024 → v3=2048
+# Why cutoff 扩到 2048:
+#   - v3 数据包含多轮样本（history + 当前轮），1024 会截断
+#   - 和 SFT v3 的 cutoff 对齐，避免训练/推理不一致
+#   - 48GB 显存绰绰有余
+
+### ═══════════════════ 训练超参数 ═══════════════════
+
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+# 等效 batch = 8，DPO 内存占用是 SFT 的 2 倍（要同时跑 π_θ 和 π_ref），batch 不能太大
+
+learning_rate: 5e-6
+# Why 5e-6: DPO 标准值，比 SFT (3e-5) 低一个量级
+#   DPO 是精细调校偏好，不是学新能力，小学习率防止破坏 SFT 基础
+
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+weight_decay: 0.01
+bf16: true
+max_grad_norm: 1.0
+gradient_checkpointing: true
+
+### ═══════════════════ 验证配置 ═══════════════════
+
+val_size: 0.10       # 从 1070 对里划 10% = 107 对做验证
+eval_steps: 25       # 比 v2 (50) 更频繁，总步数只有约 270 步
+eval_strategy: steps
+
+### ═══════════════════ 最优 checkpoint 自动保存 ═══════════════════
+### [v3 新增] 避免 v2 那种"最优 checkpoint 被 save_total_limit 淘汰"的坑
+
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+# Why 三行组合:
+#   - load_best_model_at_end: 训练结束自动装回最优 checkpoint
+#   - 配合 save_total_limit 时，强制保留最优，不会被淘汰
+#   - metric + greater_is_better: 明确告诉 trainer "eval_loss 越小越好"
+
+### ═══════════════════ 输出配置 ═══════════════════
+
+logging_steps: 5
+save_steps: 25         # 和 eval_steps 对齐（load_best_model_at_end 要求两者一致）
+save_total_limit: 3    # 最多存 3 个，加上 load_best_model_at_end 会保护最优
+
+output_dir: /root/autodl-tmp/saves/qwen2.5-7b/qlora/dpo_v3
+overwrite_output_dir: true
+
+report_to: tensorboard
+plot_loss: true
